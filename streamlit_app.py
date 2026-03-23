@@ -1,106 +1,126 @@
 import streamlit as st
 import re
 
-# Configuração da Página
-st.set_page_config(page_title="Investigative Dossier Builder", layout="wide")
+# Page Config
+st.set_page_config(page_title="Dossier Pro: Multi-Source", layout="wide")
 
 def validate(value, label):
-    """Retorna o valor ou o aviso em negrito se estiver faltando."""
+    """Returns the value or a bold warning if missing."""
     if not value or str(value).strip() in ["", "None", "N/A", "-", "None"]:
         return f"**(MISSING {label.upper()} PLEASE UPDATE)**"
     return str(value).strip()
 
 def format_phone(phone_list):
-    """Adiciona +55 e formata números de telefone encontrados."""
+    """Adds +55 to all found numbers."""
     if not phone_list:
         return f"**(MISSING PHONE PLEASE UPDATE)**"
-    formatted = []
-    for p in phone_list:
-        # Remove caracteres não numéricos para padronizar
-        clean_p = re.sub(r"\D", "", p)
-        formatted.append(f"+55 {p.strip()}")
-    return " / ".join(formatted)
+    # Remove duplicates and format
+    unique_phones = list(set(phone_list))
+    return " / ".join([f"+55 {p.strip()}" for p in unique_phones])
 
-def extract_data(text):
-    # Regex Patterns
-    patterns = {
-        "domain": r"(?:domain:|investigation is)\s+([a-z0-9.-]+)",
-        "cnpj": r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}",
-        "razao": r"Razão Social:\s+([^\n\r]+)",
-        "fantasia": r"Nome Fantasia:\s+([^\n\r]+)",
-        "founding_date": r"(?:Fundada em|Created on|Data de Abertura:)\s+([\d/]+|[\d-]+)",
-        "location": r"(?:Município:|Cidade:)\s+([^\n\r]+)",
-        "activity": r"(?:CNAE principal|atividade/CNAE principal)\s+[\d\-]+\s+-\s+([^,.\n\r]+)",
-        "status": r"Situação(?:\s+Cadastral)?:\s+(\w+)",
-        "address": r"(?:Endereço completo:|Logradouro:)\s+([^\n\r]+(?:-[^\n\r]+)?)",
-        "emails": r"[\w\.-]+@[\w\.-]+\.\w+",
-        "phones": r"\(\d{2}\)\s\d{4,5}-\d{4}",
-        "fb": r"https://www.facebook.com/[^\s/\"']+",
-        "ig": r"https://www.instagram.com/[^\s/\"']+",
-        "li": r"https://www.linkedin.com/in/[^\s/\"']+"
-    }
-    
+def extract_by_source(text):
     res = {}
-    for key, pat in patterns.items():
-        if key in ["emails", "phones"]: # Campos que podem ter múltiplos
-            res[key] = list(set(re.findall(pat, text, re.I)))
+    
+    # --- SOURCE 1: INFORME CADASTRAL ---
+    if "informecadastral.com.br" in text.lower():
+        st.sidebar.success("Source: Informe Cadastral")
+        res["source_name"] = "Informe Cadastral"
+        res["cnpj"] = re.search(r"CNPJ:\s+(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})", text)
+        res["razao"] = re.search(r"Razão Social:\s+([^\n\r]+)", text)
+        res["fantasia"] = re.search(r"Nome Fantasia:\s+([^\n\r]+)", text)
+        res["founding_date"] = re.search(r"Data de Abertura:\s+([\d/]+)", text)
+        res["status"] = re.search(r"Situação Cadastral:\s+(\w+)", text)
+        res["location"] = re.search(r"Município:\s+([^\n\r]+)", text)
+        res["activity"] = re.search(r"Atividade Principal:\s+[\d\.-]+\s+-\s+([^,.\n\r]+)", text)
+        res["address"] = re.search(r"Logradouro:\s+([^\n\r]+)", text)
+        # Capture partners from the "Quadro de Sócios" section
+        res["partners"] = re.findall(r"Sócio-Administrador\s+([A-Z\s]{5,})", text)
+
+    # --- SOURCE 2: CADASTRO EMPRESA ---
+    elif "cadastroempresa.com.br" in text.lower():
+        st.sidebar.success("Source: Cadastro Empresa")
+        res["source_name"] = "Cadastro Empresa"
+        res["cnpj"] = re.search(r"CNPJ:\s+(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})", text)
+        res["razao"] = re.search(r"Razão Social:\s+([^\n\r]+)", text)
+        res["fantasia"] = re.search(r"Nome Fantasia:\s+([^\n\r]+)", text)
+        res["founding_date"] = re.search(r"Data de Abertura:\s+([\d/]+)", text)
+        res["status"] = re.search(r"Situação:\s+(\w+)", text)
+        res["location"] = re.search(r"Município:\s+([^\n\r]+)", text)
+        res["activity"] = re.search(r"CNAE/Atividade Principal:\s+[\d\-]+\s+-\s+([^,.\n\r]+)", text)
+        res["address"] = re.search(r"Endereço completo:\s+([^\n\r]+)", text)
+        res["partners"] = re.findall(r"(?:Sócio-Administrador|Sócio):\s+([^\n\r]+)", text)
+
+    # --- FALLBACK: GENERAL REGEX ---
+    else:
+        st.sidebar.warning("Source: General/Unknown")
+        res["source_name"] = "General Source"
+        res["cnpj"] = re.search(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}", text)
+        res["razao"] = re.search(r"(?:Razão Social|owner):\s+([^\n\r]+)", text, re.I)
+        res["fantasia"] = re.search(r"Nome Fantasia:\s+([^\n\r]+)", text, re.I)
+        res["founding_date"] = re.search(r"(?:Fundada em|Abertura|created):\s+([\d/]+|[\d]{8})", text, re.I)
+        res["status"] = re.search(r"Situação:\s+(\w+)", text, re.I)
+        res["location"] = re.search(r"(?:Município|Cidade):\s+([^\n\r]+)", text, re.I)
+        res["activity"] = re.search(r"(?:CNAE|Atividade):\s+([^\n\r]+)", text, re.I)
+        res["address"] = re.search(r"(?:Logradouro|Address):\s+([^\n\r]+)", text, re.I)
+        res["partners"] = re.findall(r"(?:Sócio|Administrador):\s+([^\n\r]+)", text, re.I)
+
+    # --- GLOBAL EXTRACTIONS (Always looking for these) ---
+    res["domain"] = re.search(r"(?:domain:|investigation is)\s+([a-z0-9.-]+)", text, re.I)
+    res["emails"] = list(set(re.findall(r"[\w\.-]+@[\w\.-]+\.\w+", text)))
+    res["phones"] = list(set(re.findall(r"\(\d{2}\)\s\d{4,5}-\d{4}", text)))
+    res["fb"] = re.search(r"https://www.facebook.com/[^\s/\"']+", text)
+    res["ig"] = re.search(r"https://www.instagram.com/[^\s/\"']+", text)
+    res["li"] = re.search(r"https://www.linkedin.com/in/[^\s/\"']+", text)
+
+    # Convert Match objects to clean strings
+    cleaned = {}
+    for k, v in res.items():
+        if k in ["emails", "phones", "partners", "source_name"]:
+            cleaned[k] = v
         else:
-            match = re.search(pat, text, re.I)
-            res[key] = match.group(1) if match and match.groups() else (match.group(0) if match else None)
-    
-    # Captura de Sócios (Quadro de Sócios)
-    # Procura por padrões comuns em sites de CNPJ: "Sócio-Administrador: Nome"
-    partners_raw = re.findall(r"(?:Sócio-Administrador|Sócio):\s+([^\n\r]+)", text)
-    res["partners"] = partners_raw if partners_raw else []
-    
-    return res
+            cleaned[k] = v.group(1).strip() if v and v.groups() else (v.group(0).strip() if v else None)
+    return cleaned
 
-# --- INTERFACE STREAMLIT ---
-st.title("🕵️ Dossier Structure Tool")
+# --- UI INTERFACE ---
+st.title("🕵️ Dossier Structure Tool (Multi-Source)")
 
-col1, col2 = st.columns([1, 1])
-
-with col1:
-    st.subheader("Raw Data Input")
-    raw_input = st.text_area("Paste research data:", height=500)
+raw_input = st.text_area("Paste your research text here:", height=300)
 
 if raw_input:
-    data = extract_data(raw_input)
+    data = extract_by_source(raw_input)
     
-    # Validações individuais
-    dom = validate(data['domain'], "Domain")
-    cnpj = validate(data['cnpj'], "CNPJ")
-    razao = validate(data['razao'], "Legal Name")
-    fantasia = validate(data['fantasia'], "Fantasy Name")
-    date = validate(data['founding_date'], "Foundation Date")
-    loc = validate(data['location'], "Location")
-    act = validate(data['activity'], "Activity")
-    stat = validate(data['status'], "Status")
-    addr = validate(data['address'], "Address")
+    # Validation & Formatting
+    dom = validate(data.get('domain'), "Domain")
+    cnpj = validate(data.get('cnpj'), "CNPJ")
+    razao = validate(data.get('razao'), "Legal Name")
+    fantasia = validate(data.get('fantasia'), "Fantasy Name")
+    date = validate(data.get('founding_date'), "Foundation Date")
+    loc = validate(data.get('location'), "Location")
+    act = validate(data.get('activity'), "Activity")
+    stat = validate(data.get('status'), "Status")
+    addr = validate(data.get('address'), "Address")
     
-    # Telefones e Emails
-    phones_str = format_phone(data['phones'])
-    emails_str = " / ".join(data['emails']) if data['emails'] else f"**(MISSING EMAIL PLEASE UPDATE)**"
+    phones = format_phone(data.get('phones'))
+    emails = " / ".join(data.get('emails')) if data.get('emails') else "**(MISSING EMAIL PLEASE UPDATE)**"
     
-    # Redes Sociais (Filtro para remover None)
-    social_links = [data['fb'], data['ig'], data['li']]
-    social_str = "\n".join([link for link in social_links if link]) if any(social_links) else f"**(MISSING SOCIAL MEDIA PLEASE UPDATE)**"
+    socials = [data.get('fb'), data.get('ig'), data.get('li')]
+    social_str = "\n".join([s for s in socials if s]) if any(socials) else "**(MISSING SOCIAL MEDIA PLEASE UPDATE)**"
 
-    # Construção dos Sócios
-    partners_block = ""
-    if not data['partners']:
-        partners_block = "Partner: **(MISSING PARTNER PLEASE UPDATE)**\nEmail - **(MISSING INFO)**\nSource - **(MISSING INFO)**"
+    # Multi-Partner Block
+    partner_text = ""
+    if not data.get('partners'):
+        partner_text = "Partner: **(MISSING PARTNER PLEASE UPDATE)**\nEmail - **(MISSING INFO)**\nSource - **(MISSING INFO)**"
     else:
         for p in data['partners']:
-            partners_block += f"Partner: {p} (Sócio-Administrador)\nEmail - **(CHECK PERSONAL EMAIL)**\nSource - Receita Federal / LinkedIn\n\n"
+            partner_text += f"Partner: {p.strip()} (Sócio-Administrador)\nEmail - **(CHECK PERSONAL EMAIL)**\nSource - {data['source_name']}\n\n"
 
-    # Template do Dossier
-    description = (f"{razao}, operating under the Corporate Taxpayer ID (CNPJ) {cnpj}, "
-                   f"was founded on {date}. The company's official registry name is {razao}. "
-                   f"Located in the city of {loc}, its main area of activity is {act}. "
-                   f"According to the Brazilian Federal Revenue, the company's current status is {stat}.")
+    # Assemble Final Dossier
+    about = (f"{razao}, operating under the Corporate Taxpayer ID (CNPJ) {cnpj}, "
+             f"was founded on {date}. The company's official registry name is {razao}. "
+             f"Located in the city of {loc}, its main area of activity is {act}. "
+             f"According to the Brazilian Federal Revenue, the company's current status is {stat}.")
 
-    final_dossier = f"""ACTIONABLE DOMAIN:
+    dossier = f"""ACTIONABLE DOMAIN:
 {dom}
 
 LEGAL INFO/NAME OF THE COMPANY:
@@ -109,24 +129,22 @@ Fantasy Name: {fantasia}
 Legal Name: {razao}
 
 COMPANY DESCRIPTION/ABOUT:
-{description}
+{about}
 
 COMPANY WEBSITE: 
 
 CONTACT/ADDRESS INFORMATION:
-Address: {addr} (Source: Federal Revenue)
-Phone: {phones_str}
-Email: {emails_str} (Source: Official Records)
+Address: {addr} (Source: {data['source_name']})
+Phone: {phones}
+Email: {emails} (Source: {data['source_name']})
 
 KEY PERSONNEL:
-{partners_block}
+{partner_text}
 SOCIAL MEDIA:
 {social_str}
 
 OBSERVATIONS:
 """
 
-    with col2:
-        st.subheader("Final Structured Dossier")
-        st.code(final_dossier, language="markdown")
-        st.info("Copy the text using the icon in the top-right of the box above.")
+    st.subheader(f"Formatted Result (via {data['source_name']})")
+    st.code(dossier, language="markdown")
