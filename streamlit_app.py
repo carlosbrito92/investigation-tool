@@ -5,23 +5,46 @@ import re
 st.set_page_config(page_title="Dossier Pro: Multi-Source", layout="wide")
 
 def validate(value, label):
-    """Retorna o valor ou o aviso em negrito se estiver faltando."""
     if not value or str(value).strip() in ["", "None", "N/A", "-", "None"]:
         return f"**(MISSING {label.upper()} PLEASE UPDATE)**"
     return str(value).strip()
 
-def format_phone(phone_list):
-    """Adiciona +55 a todos os números encontrados."""
+def format_phone(phone_list, source):
     if not phone_list:
         return f"**(MISSING PHONE PLEASE UPDATE)**"
     unique_phones = list(set(phone_list))
-    return " / ".join([f"+55 {p.strip()}" for p in unique_phones])
+    formatted = " / ".join([f"+55 {p.strip()}" for p in unique_phones])
+    return f"{formatted} (Source: {source})"
 
 def extract_by_source(text):
     res = {}
     
-    # --- SOURCE 1: INFORME CADASTRAL ---
-    if "informecadastral.com.br" in text.lower():
+    # --- NOVO: REGISTRO.BR (Captura de texto grudado) ---
+    if "registro.br" in text.lower():
+        st.sidebar.success("Source: Registro.br")
+        res["source_name"] = "Registro.br"
+        res["domain"] = re.search(r"Domínio\s+([a-z0-9.-]+)", text, re.I)
+        # Captura o Titular (para após a palavra 'Titular' até 'Documento')
+        res["razao"] = re.search(r"Titular([A-Z][^0-9\n\r]+?)(?=Documento|$)", text)
+        res["cnpj_cpf"] = re.search(r"Documento([\d\.\-\*]+)", text)
+        # Email específico do Registro.br
+        res["whois_email"] = re.search(r"Email([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})", text)
+        res["founding_date"] = re.search(r"Criado([\d/]{10})", text)
+        res["status"] = re.search(r"Status(\w+)", text)
+
+    # --- NOVO: DOMAINTOOLS ---
+    elif "whois.domaintools.com" in text.lower() or "Whois Record for" in text:
+        st.sidebar.success("Source: DomainTools")
+        res["source_name"] = "DomainTools"
+        res["domain"] = re.search(r"domain:\s+([a-z0-9.-]+)", text, re.I)
+        res["razao"] = re.search(r"owner:\s+([^\n\r]+)", text, re.I)
+        res["cnpj_cpf"] = re.search(r"ownerid:\s+([^\n\r]+)", text, re.I)
+        res["founding_date"] = re.search(r"created:\s+([\d]{8})", text) # Formato YYYYMMDD
+        res["status"] = re.search(r"status:\s+(\w+)", text)
+        res["whois_email"] = re.search(r"e-mail:\s+([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})", text, re.I)
+
+    # --- SOURCE: INFORME CADASTRAL ---
+    elif "informecadastral.com.br" in text.lower():
         st.sidebar.success("Source: Informe Cadastral")
         res["source_name"] = "Informe Cadastral"
         res["cnpj"] = re.search(r"CNPJ:\s+(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})", text)
@@ -34,7 +57,7 @@ def extract_by_source(text):
         res["address"] = re.search(r"Logradouro:\s+([^\n\r]+)", text)
         res["partners"] = re.findall(r"Sócio-Administrador\s+([A-Z\s]{5,})", text)
 
-    # --- SOURCE 2: CADASTRO EMPRESA ---
+    # --- SOURCE: CADASTRO EMPRESA ---
     elif "cadastroempresa.com.br" in text.lower():
         st.sidebar.success("Source: Cadastro Empresa")
         res["source_name"] = "Cadastro Empresa"
@@ -48,29 +71,22 @@ def extract_by_source(text):
         res["address"] = re.search(r"Endereço completo:\s+([^\n\r]+)", text)
         res["partners"] = re.findall(r"(?:Sócio-Administrador|Sócio):\s+([^\n\r]+)", text)
 
-    # --- FALLBACK: GENERAL REGEX ---
+    # --- FALLBACK ---
     else:
-        st.sidebar.warning("Source: General/Unknown")
+        st.sidebar.warning("Source: General Source")
         res["source_name"] = "General Source"
         res["cnpj"] = re.search(r"\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}", text)
         res["razao"] = re.search(r"(?:Razão Social|owner):\s+([^\n\r]+)", text, re.I)
-        res["fantasia"] = re.search(r"Nome Fantasia:\s+([^\n\r]+)", text, re.I)
-        res["founding_date"] = re.search(r"(?:Fundada em|Abertura|created):\s+([\d/]+|[\d]{8})", text, re.I)
-        res["status"] = re.search(r"Situação:\s+(\w+)", text, re.I)
-        res["location"] = re.search(r"(?:Município|Cidade):\s+([^\n\r]+)", text, re.I)
-        res["activity"] = re.search(r"(?:CNAE|Atividade):\s+([^\n\r]+)", text, re.I)
-        res["address"] = re.search(r"(?:Logradouro|Address):\s+([^\n\r]+)", text, re.I)
-        res["partners"] = re.findall(r"(?:Sócio|Administrador):\s+([^\n\r]+)", text, re.I)
+        res["founding_date"] = re.search(r"(?:Fundada em|Abertura|created|Criado):\s+([\d/]+|[\d]{8})", text, re.I)
+        res["status"] = re.search(r"Situação|Status:\s+(\w+)", text, re.I)
 
-    # --- GLOBAL EXTRACTIONS ---
-    res["domain"] = re.search(r"(?:domain:|investigation is)\s+([a-z0-9.-]+)", text, re.I)
+    # Global Patterns
     res["emails"] = list(set(re.findall(r"[\w\.-]+@[\w\.-]+\.\w+", text)))
     res["phones"] = list(set(re.findall(r"\(\d{2}\)\s\d{4,5}-\d{4}", text)))
     res["fb"] = re.search(r"https://www.facebook.com/[^\s/\"']+", text)
     res["ig"] = re.search(r"https://www.instagram.com/[^\s/\"']+", text)
     res["li"] = re.search(r"https://www.linkedin.com/in/[^\s/\"']+", text)
 
-    # Limpeza dos objetos Match
     cleaned = {}
     for k, v in res.items():
         if k in ["emails", "phones", "partners", "source_name"]:
@@ -79,17 +95,22 @@ def extract_by_source(text):
             cleaned[k] = v.group(1).strip() if v and v.groups() else (v.group(0).strip() if v else None)
     return cleaned
 
-# --- UI ---
-st.title("🕵️ Dossier Structure Tool")
+# --- INTERFACE ---
+st.title("🕵️ Dossier Structure Tool (Multi-Source)")
 
-raw_input = st.text_area("Paste research text here:", height=300)
+if st.sidebar.button("🗑️ Clear All Data"):
+    st.rerun()
+
+raw_input = st.text_area("Paste research text here (Whois, CNPJ sites, etc.):", height=300)
 
 if raw_input:
     data = extract_by_source(raw_input)
     
     # Validações
     dom = validate(data.get('domain'), "Domain")
-    cnpj = validate(data.get('cnpj'), "CNPJ")
+    # Tenta CNPJ ou o Documento mascarado do Whois
+    cnpj_display = data.get('cnpj') or data.get('cnpj_cpf')
+    cnpj = validate(cnpj_display, "CNPJ/Document")
     razao = validate(data.get('razao'), "Legal Name")
     fantasia = validate(data.get('fantasia'), "Fantasy Name")
     date = validate(data.get('founding_date'), "Foundation Date")
@@ -98,31 +119,36 @@ if raw_input:
     stat = validate(data.get('status'), "Status")
     addr = validate(data.get('address'), "Address")
     
-    # Telefones e Emails com fonte
-    phones = format_phone(data.get('phones'))
-    emails = " / ".join(data.get('emails')) if data.get('emails') else "**(MISSING EMAIL PLEASE UPDATE)**"
+    phones = format_phone(data.get('phones'), data['source_name'])
     
-    # Redes Sociais
+    # Combina emails encontrados no texto com o email específico do Whois
+    all_emails = data.get('emails', [])
+    if data.get('whois_email'): all_emails.append(data['whois_email'])
+    emails_str = " / ".join(list(set(all_emails))) if all_emails else "**(MISSING EMAIL PLEASE UPDATE)**"
+    
     socials = [data.get('fb'), data.get('ig'), data.get('li')]
     social_str = "\n".join([s for s in socials if s]) if any(socials) else "**(MISSING SOCIAL MEDIA PLEASE UPDATE)**"
 
-    # Bloco de Sócios
+    # Partner Block
     partner_text = ""
-    if not data.get('partners'):
+    partners = data.get('partners', [])
+    if not partners:
+        # Se for Whois, o 'Titular' é o parceiro principal
+        if data['source_name'] in ["Registro.br", "DomainTools"]:
+            partners = [data.get('razao')]
+    
+    for p in partners:
+        if p and p != "None":
+            partner_text += f"Partner: {p.strip()} (Sócio-Administrador/Titular)\nEmail - **(CHECK PERSONAL EMAIL)**\nSource - {data['source_name']}\n\n"
+    if not partner_text:
         partner_text = "Partner: **(MISSING PARTNER PLEASE UPDATE)**\nEmail - **(MISSING INFO)**\nSource - **(MISSING INFO)**"
-    else:
-        for p in data['partners']:
-            partner_text += f"Partner: {p.strip()} (Sócio-Administrador)\nEmail - **(CHECK PERSONAL EMAIL)**\nSource - {data['source_name']}\n\n"
 
-    # Montagem do ABOUT com a fonte do telefone
-    phone_source = f"(Source: {data['source_name']})" if data.get('phones') else ""
+    # Assemble Dossier
     about = (f"{razao}, operating under the Corporate Taxpayer ID (CNPJ) {cnpj}, "
              f"was founded on {date}. The company's official registry name is {razao}. "
              f"Located in the city of {loc}, its main area of activity is {act}. "
-             f"According to the Brazilian Federal Revenue, the company's current status is {stat}. "
-             f"Contact Phone: {phones} {phone_source}.")
+             f"According to the Brazilian Federal Revenue, the company's current status is {stat}.")
 
-    # Template Final
     dossier = f"""ACTIONABLE DOMAIN:
 {dom}
 
@@ -139,7 +165,7 @@ COMPANY WEBSITE:
 CONTACT/ADDRESS INFORMATION:
 Address: {addr} (Source: {data['source_name']})
 Phone: {phones}
-Email: {emails} (Source: {data['source_name']})
+Email: {emails_str} (Source: {data['source_name']})
 
 KEY PERSONNEL:
 {partner_text}
@@ -149,8 +175,5 @@ SOCIAL MEDIA:
 OBSERVATIONS:
 """
 
-    st.subheader(f"Formatted Result (via {data['source_name']})")
+    st.subheader(f"Formatted Result (Source: {data['source_name']})")
     st.code(dossier, language="markdown")
-    
-    if st.button("Clear Data"):
-        st.rerun()
