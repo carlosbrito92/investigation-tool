@@ -87,6 +87,36 @@ def get_partner_email_or_fallback(partner_email, whois_email, company_email):
     
     return ""
 
+def generate_description(razao, cnpj, foundation_date, location, main_activity, current_status):
+    """
+    Gera COMPANY DESCRIPTION seguindo padrão específico:
+    [Company & CNPJ]., operating under the Corporate Taxpayer ID (CNPJ) ###, 
+    was founded on [Foundation Date]. The company's official registry name is [Registry Name]. 
+    Located in the city of [Location], its main area of activity is [Main Activity]. 
+    According to the Brazilian Federal Revenue, the company's current status is [Current Status]
+    """
+    
+    # Validar campos obrigatórios
+    if not razao or razao.strip() in ["", "N/A", "-"]:
+        return ""
+    
+    # Usar "N/A" ou "Unknown" para campos faltando
+    cnpj_str = cnpj if (cnpj and cnpj.strip() not in ["", "N/A", "-"]) else "N/A"
+    foundation = foundation_date if (foundation_date and foundation_date.strip() not in ["", "N/A", "-"]) else "N/A"
+    location_str = location if (location and location.strip() not in ["", "N/A", "-"]) else "N/A"
+    activity_str = main_activity if (main_activity and main_activity.strip() not in ["", "N/A", "-"]) else "N/A"
+    status_str = current_status if (current_status and current_status.strip() not in ["", "N/A", "-"]) else "Active"
+    
+    # Montar descrição seguindo padrão
+    description = (
+        f"{razao.strip()}, operating under the Corporate Taxpayer ID (CNPJ) {cnpj_str}, "
+        f"was founded on {foundation}. The company's official registry name is {razao.strip()}. "
+        f"Located in the city of {location_str}, its main area of activity is {activity_str}. "
+        f"According to the Brazilian Federal Revenue, the company's current status is {status_str}."
+    )
+    
+    return description
+
 def extract_all_emails(whois_data, company_email=""):
     """
     Extrai TODOS os emails do texto (não só o primeiro)
@@ -181,7 +211,8 @@ def detect_red_flags(domain_age_days, address_mismatch, whois_recent_change, obs
 def generate_dossier(domain, cnpj, fantasia, razao, descricao, website, 
                      endereco, telefone, email, partner_name, partner_email,
                      facebook, instagram, linkedin, observations, source,
-                     whois_data="", cadastro_link="", additional_emails="", additional_phones=""):
+                     whois_data="", cadastro_link="", additional_emails="", additional_phones="",
+                     foundation_date="", location="", main_activity="", current_status=""):
     """Gera o dossier com fallbacks e lógica automática"""
     
     # LÓGICA: Fallback para CNPJ se vazio
@@ -240,10 +271,11 @@ def generate_dossier(domain, cnpj, fantasia, razao, descricao, website,
     if emails_str != "**(MISSING EMAIL PLEASE UPDATE)**":
         emails_str = f"{emails_str} (Source: {source})"
     
-    # Descrição
+    # LÓGICA: Auto-gerar COMPANY DESCRIPTION se vazio
     if not descricao or descricao.strip() in ["", "N/A", "-"]:
-        if razao != f"**(MISSING LEGAL NAME PLEASE UPDATE)**":
-            descricao = f"{razao}, operating under the Corporate Taxpayer ID (CNPJ) {cnpj}, is a company registered in Brazil."
+        # Se tem dados de registry, gera automático
+        if razao and razao.strip() not in ["", "N/A", "-"]:
+            descricao = generate_description(razao, cnpj, foundation_date, location, main_activity, current_status)
         else:
             descricao = "**(MISSING DESCRIPTION PLEASE UPDATE)**"
     
@@ -315,7 +347,9 @@ if 'form_data' not in st.session_state:
         'email': '', 'partner_name': '', 'partner_email': '',
         'facebook': '', 'instagram': '', 'linkedin': '',
         'observations': '', 'source': 'General Source',
-        'whois_data': '', 'cadastro_link': ''
+        'whois_data': '', 'cadastro_link': '',
+        'foundation_date': '', 'location': '', 'main_activity': '', 'current_status': '',
+        'additional_phones': '', 'additional_emails': ''
     }
 
 # Sidebar
@@ -395,10 +429,50 @@ with col2:
         placeholder="e.g., SP Portões"
     )
 
+st.markdown("**Company Registry Information** (used for auto-generated description)")
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    if 'foundation_date' not in st.session_state.form_data:
+        st.session_state.form_data['foundation_date'] = ""
+    st.session_state.form_data['foundation_date'] = st.text_input(
+        "📅 Foundation Date",
+        value=st.session_state.form_data['foundation_date'],
+        placeholder="e.g., 24/11/2016"
+    )
+
+with col2:
+    if 'location' not in st.session_state.form_data:
+        st.session_state.form_data['location'] = ""
+    st.session_state.form_data['location'] = st.text_input(
+        "📍 Location (City)",
+        value=st.session_state.form_data['location'],
+        placeholder="e.g., São Paulo"
+    )
+
+with col3:
+    if 'main_activity' not in st.session_state.form_data:
+        st.session_state.form_data['main_activity'] = ""
+    st.session_state.form_data['main_activity'] = st.text_input(
+        "🏭 Main Activity",
+        value=st.session_state.form_data['main_activity'],
+        placeholder="e.g., Installation of advertising panels"
+    )
+
+with col4:
+    if 'current_status' not in st.session_state.form_data:
+        st.session_state.form_data['current_status'] = ""
+    st.session_state.form_data['current_status'] = st.text_input(
+        "✅ Current Status",
+        value=st.session_state.form_data['current_status'],
+        placeholder="e.g., Ativa"
+    )
+
+st.markdown("**Or paste description manually:**")
 st.session_state.form_data['descricao'] = st.text_area(
-    "📄 Company Description/About",
+    "📄 Company Description/About (auto-generated if empty)",
     value=st.session_state.form_data['descricao'],
-    placeholder="Company overview and main activities...",
+    placeholder="Leave empty to auto-generate from registry info above...",
     height=80
 )
 
@@ -523,7 +597,11 @@ with col_generate:
             st.session_state.form_data['whois_data'],
             st.session_state.form_data['cadastro_link'],
             st.session_state.form_data.get('additional_emails', ''),
-            st.session_state.form_data.get('additional_phones', '')
+            st.session_state.form_data.get('additional_phones', ''),
+            st.session_state.form_data.get('foundation_date', ''),
+            st.session_state.form_data.get('location', ''),
+            st.session_state.form_data.get('main_activity', ''),
+            st.session_state.form_data.get('current_status', '')
         )
         
         st.session_state.dossier = dossier
