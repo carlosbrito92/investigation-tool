@@ -1,322 +1,628 @@
 import streamlit as st
 import re
+import json
+import os
 from datetime import datetime
 
 # Page Config
-st.set_page_config(page_title="Dossier Pro: Multi-Source v2", layout="wide")
+st.set_page_config(page_title="Dossier Pro v5", layout="wide")
+
+# ============================================
+# CONSTANTS — TRANSLATIONS & DATA
+# ============================================
+
+STATUS_TRANSLATIONS = {
+    # Situação Cadastral (Receita Federal / Cadastro Empresa)
+    "ativa": "Active",
+    "ativo": "Active",
+    "baixada": "Closed",
+    "baixado": "Closed",
+    "inapta": "Inactive",
+    "inapto": "Inactive",
+    "suspensa": "Suspended",
+    "suspenso": "Suspended",
+    "nula": "Null",
+    "nulo": "Null",
+    "em liquidação": "In Liquidation",
+    "em liquidacao": "In Liquidation",
+    # Whois / Registro.br
+    "publicado": "Published",
+    "reservado": "Reserved",
+    "expirado": "Expired",
+    "cancelado": "Cancelled",
+    "aguardando pagamento": "Awaiting Payment",
+    "on hold": "On Hold",
+}
+
+ACTIVITY_HISTORY_FILE = "activities_history.json"
+
+# ============================================
+# ACTIVITY HISTORY — PERSISTENCE
+# ============================================
+
+def load_activity_history():
+    if os.path.exists(ACTIVITY_HISTORY_FILE):
+        try:
+            with open(ACTIVITY_HISTORY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_activity_to_history(activity: str):
+    if not activity or not activity.strip():
+        return
+    history = load_activity_history()
+    activity = activity.strip()
+    if activity not in history:
+        history.insert(0, activity)
+        history = history[:100]  # cap at 100 entries
+        try:
+            with open(ACTIVITY_HISTORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(history, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
 # ============================================
 # UTILITY FUNCTIONS
 # ============================================
 
+def translate_status(value: str) -> str:
+    """Translate known PT status values to English. Passes through unknown values unchanged."""
+    if not value:
+        return value
+    normalized = value.strip().lower()
+    return STATUS_TRANSLATIONS.get(normalized, value.strip())
+
 def validate(value, label):
-    """Valida campo e retorna placeholder se vazio"""
-    if not value or str(value).strip() in ["", "None", "N/A", "-", "None"]:
+    if not value or str(value).strip() in ["", "None", "N/A", "-"]:
         return f"**(MISSING {label.upper()} PLEASE UPDATE)**"
     return str(value).strip()
 
 def format_phone(phone):
-    """Formata telefone com +55"""
     if not phone or phone.strip() in ["", "N/A", "-"]:
-        return f"**(MISSING PHONE PLEASE UPDATE)**"
+        return "**(MISSING PHONE PLEASE UPDATE)**"
     phone = phone.strip()
     if not phone.startswith("+55"):
         phone = f"+55 {phone}"
     return phone
 
-def extract_cnpj_from_text(text):
-    """Extrai CNPJ de qualquer texto (Whois, Cadastro, etc)"""
+def is_empty(value):
+    return not value or str(value).strip() in ["", "None", "N/A", "-"]
+
+def extract_cnpj(text):
     pattern = r'\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2}'
     match = re.search(pattern, text)
     return match.group(0) if match else None
 
-def extract_email_from_text(text):
-    """Extrai primeiro email válido de texto"""
+def extract_email(text):
     pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
     match = re.search(pattern, text)
     return match.group(0) if match else None
 
-def extract_phone_from_text(text):
-    """Extrai primeiro telefone válido de texto"""
-    # Padrão brasileiro: (XX) XXXXX-XXXX ou (XX) XXXX-XXXX
-    pattern = r'\(\d{2}\)\s*\d{4,5}-\d{4}'
+def extract_all_emails(text):
+    pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+    return list(dict.fromkeys(re.findall(pattern, text)))
+
+def extract_phone(text):
+    pattern = r'\(?\d{2}\)?\s*\d{4,5}[-\s]?\d{4}'
     match = re.search(pattern, text)
     return match.group(0) if match else None
 
+def extract_all_phones(text):
+    pattern = r'\(\d{2}\)\s*\d{4,5}-\d{4}'
+    return list(dict.fromkeys(re.findall(pattern, text)))
+
+def extract_urls(text):
+    pattern = r'https?://[^\s\"\'\)\]>]+'
+    return re.findall(pattern, text)
+
 def get_website_or_fallback(website, facebook, instagram, linkedin, cadastro_link):
-    """
-    Regra de prioridade para COMPANY WEBSITE:
-    1. Se tem website direto → usa
-    2. Se não, usa primeiro social media (prioridade: fb > ig > li)
-    3. Se não, usa link de cadastro
-    4. Se não, vazio
-    """
-    if website and website.strip() not in ["", "N/A", "-"]:
-        return website.strip()
-    
-    if facebook and facebook.strip() not in ["", "N/A", "-"]:
-        return facebook.strip()
-    
-    if instagram and instagram.strip() not in ["", "N/A", "-"]:
-        return instagram.strip()
-    
-    if linkedin and linkedin.strip() not in ["", "N/A", "-"]:
-        return linkedin.strip()
-    
-    if cadastro_link and cadastro_link.strip() not in ["", "N/A", "-"]:
-        return cadastro_link.strip()
-    
+    for val in [website, facebook, instagram, linkedin, cadastro_link]:
+        if val and val.strip() not in ["", "N/A", "-"]:
+            return val.strip()
     return ""
 
 def get_partner_email_or_fallback(partner_email, whois_email, company_email):
-    """
-    Fallback para email do partner:
-    1. Se tem email específico do partner → usa
-    2. Se não, tenta email genérico da company
-    3. Se não, tenta email do Whois
-    4. Se não, vazio
-    """
-    if partner_email and partner_email.strip() not in ["", "N/A", "-"]:
-        return partner_email.strip()
-    
-    if company_email and company_email.strip() not in ["", "N/A", "-"]:
-        return company_email.strip()
-    
-    if whois_email and whois_email.strip() not in ["", "N/A", "-"]:
-        return whois_email.strip()
-    
+    for val in [partner_email, company_email, whois_email]:
+        if val and val.strip() not in ["", "N/A", "-"]:
+            return val.strip()
     return ""
 
+def extract_all_contacts(whois_data, company_email="", company_phone="",
+                          additional_emails="", additional_phones=""):
+    all_emails = extract_all_emails(whois_data)
+    if not is_empty(company_email):
+        all_emails = [company_email.strip()] + [e for e in all_emails if e != company_email.strip()]
+    if additional_emails and additional_emails.strip():
+        all_emails += [e.strip() for e in additional_emails.split(",") if e.strip()]
+    all_emails = list(dict.fromkeys(all_emails))
+
+    all_phones = extract_all_phones(whois_data)
+    if not is_empty(company_phone):
+        all_phones = [company_phone.strip()] + [p for p in all_phones if p != company_phone.strip()]
+    if additional_phones and additional_phones.strip():
+        all_phones += [p.strip() for p in additional_phones.split(",") if p.strip()]
+    all_phones = list(dict.fromkeys(all_phones))
+
+    return all_emails, all_phones
+
+def format_multiple_contacts(items, contact_type="email"):
+    placeholder = "**(MISSING EMAIL PLEASE UPDATE)**" if contact_type == "email" else "**(MISSING PHONE PLEASE UPDATE)**"
+    if not items:
+        return placeholder
+    if contact_type == "phone":
+        formatted = []
+        for p in items:
+            p = p.strip()
+            if p and p not in ["", "N/A", "-"]:
+                if not p.startswith("+55"):
+                    p = f"+55 {p}"
+                formatted.append(p)
+        return " / ".join(formatted) if formatted else placeholder
+    else:
+        cleaned = [e.strip() for e in items if e.strip() not in ["", "N/A", "-"]]
+        return " / ".join(cleaned) if cleaned else placeholder
+
 def generate_description(razao, cnpj, foundation_date, location, main_activity, current_status):
-    """
-    Gera COMPANY DESCRIPTION seguindo padrão específico:
-    [Company & CNPJ]., operating under the Corporate Taxpayer ID (CNPJ) ###, 
-    was founded on [Foundation Date]. The company's official registry name is [Registry Name]. 
-    Located in the city of [Location], its main area of activity is [Main Activity]. 
-    According to the Brazilian Federal Revenue, the company's current status is [Current Status]
-    """
-    
-    # Validar campos obrigatórios
-    if not razao or razao.strip() in ["", "N/A", "-"]:
+    if is_empty(razao):
         return ""
-    
-    # Usar "N/A" ou "Unknown" para campos faltando
-    cnpj_str = cnpj if (cnpj and cnpj.strip() not in ["", "N/A", "-"]) else "N/A"
-    foundation = foundation_date if (foundation_date and foundation_date.strip() not in ["", "N/A", "-"]) else "N/A"
-    location_str = location if (location and location.strip() not in ["", "N/A", "-"]) else "N/A"
-    activity_str = main_activity if (main_activity and main_activity.strip() not in ["", "N/A", "-"]) else "N/A"
-    status_str = current_status if (current_status and current_status.strip() not in ["", "N/A", "-"]) else "Active"
-    
-    # Montar descrição seguindo padrão
-    description = (
+    cnpj_str = cnpj if not is_empty(cnpj) else "N/A"
+    foundation = foundation_date if not is_empty(foundation_date) else "N/A"
+    location_str = location if not is_empty(location) else "N/A"
+    activity_str = main_activity if not is_empty(main_activity) else "N/A"
+    status_str = translate_status(current_status) if not is_empty(current_status) else "Active"
+
+    return (
         f"{razao.strip()}, operating under the Corporate Taxpayer ID (CNPJ) {cnpj_str}, "
         f"was founded on {foundation}. The company's official registry name is {razao.strip()}. "
         f"Located in the city of {location_str}, its main area of activity is {activity_str}. "
         f"According to the Brazilian Federal Revenue, the company's current status is {status_str}."
     )
-    
-    return description
 
-def extract_all_emails(whois_data, company_email=""):
-    """
-    Extrai TODOS os emails do texto (não só o primeiro)
-    """
-    pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
-    emails = list(set(re.findall(pattern, whois_data)))
-    
-    # Adiciona email da company se não estiver vazio
-    if company_email and company_email.strip() not in ["", "N/A", "-"]:
-        emails.insert(0, company_email.strip())
-    
-    # Remove duplicatas mantendo ordem
-    seen = set()
-    unique_emails = []
-    for email in emails:
-        if email not in seen:
-            seen.add(email)
-            unique_emails.append(email)
-    
-    return unique_emails
+# ============================================
+# SOURCE-SPECIFIC PARSERS
+# ============================================
 
-def extract_all_phones(whois_data, company_phone=""):
+def parse_cadastro_empresa(text: str) -> dict:
     """
-    Extrai TODOS os telefones do texto (não só o primeiro)
+    Parses raw text copied from Cadastro Empresa pages.
+    Handles multiple label formats found on cadastroempresa.com.br and similar.
+    Returns a dict with field keys matching session_state form_data.
     """
-    pattern = r'\(\d{2}\)\s*\d{4,5}-\d{4}'
-    phones = list(set(re.findall(pattern, whois_data)))
-    
-    # Adiciona telefone da company se não estiver vazio
-    if company_phone and company_phone.strip() not in ["", "N/A", "-"]:
-        phones.insert(0, company_phone.strip())
-    
-    # Remove duplicatas mantendo ordem
-    seen = set()
-    unique_phones = []
-    for phone in phones:
-        if phone not in seen:
-            seen.add(phone)
-            unique_phones.append(phone)
-    
-    return unique_phones
+    result = {}
 
-def format_multiple_contacts(items, contact_type="email"):
-    """
-    Formata múltiplos emails/telefones com formatação apropriada
-    """
-    if not items or len(items) == 0:
-        if contact_type == "email":
-            return "**(MISSING EMAIL PLEASE UPDATE)**"
-        else:
-            return "**(MISSING PHONE PLEASE UPDATE)**"
-    
-    if contact_type == "phone":
-        formatted = []
-        for phone in items:
-            phone = phone.strip()
-            if phone and phone not in ["", "N/A", "-"]:
-                if not phone.startswith("+55"):
-                    phone = f"+55 {phone}"
-                formatted.append(phone)
-        
-        if not formatted:
-            return "**(MISSING PHONE PLEASE UPDATE)**"
-        return " / ".join(formatted)
-    
-    else:  # email
-        cleaned = [e.strip() for e in items if e.strip() not in ["", "N/A", "-"]]
-        if not cleaned:
-            return "**(MISSING EMAIL PLEASE UPDATE)**"
-        return " / ".join(cleaned)
+    def find(patterns, txt=text):
+        for pat in patterns:
+            m = re.search(pat, txt, re.IGNORECASE | re.MULTILINE)
+            if m:
+                val = m.group(1).strip()
+                if val and val not in ["-", "N/A", ""]:
+                    return val
+        return None
 
-def detect_red_flags(domain_age_days, address_mismatch, whois_recent_change, observations):
-    """
-    Detecta red flags automáticas:
-    - Domínio muito antigo mas empresa nova
-    - Mudança recente no Whois
-    - Inconsistência de endereço
-    """
-    flags = []
-    
-    if domain_age_days and domain_age_days > 1825:  # > 5 anos
-        flags.append(f"⚠️ Domain age: {domain_age_days} days (~{domain_age_days//365} years)")
-    
-    if whois_recent_change:
-        flags.append(f"⚠️ Recent Whois change: {whois_recent_change}")
-    
-    if address_mismatch:
-        flags.append(f"⚠️ Address mismatch between sources")
-    
-    return flags
+    # CNPJ
+    cnpj = extract_cnpj(text)
+    if cnpj:
+        result["cnpj"] = cnpj
 
-def generate_dossier(domain, cnpj, fantasia, razao, descricao, website, 
-                     endereco, telefone, email, partner_name, partner_email,
-                     facebook, instagram, linkedin, observations, source,
-                     whois_data="", cadastro_link="", additional_emails="", additional_phones="",
-                     foundation_date="", location="", main_activity="", current_status=""):
-    """Gera o dossier com fallbacks e lógica automática"""
-    
-    # LÓGICA: Fallback para CNPJ se vazio
-    if not cnpj or cnpj.strip() in ["", "N/A", "-"]:
-        extracted_cnpj = extract_cnpj_from_text(whois_data)
-        if extracted_cnpj:
-            cnpj = extracted_cnpj
-    
-    # LÓGICA: Fallback para Partner Name (usar Owner do Whois)
-    if not partner_name or partner_name.strip() in ["", "N/A", "-"]:
-        owner_match = re.search(r'owner:\s+([^\n]+)', whois_data, re.I)
-        if owner_match:
-            partner_name = owner_match.group(1).strip()
-    
-    # LÓGICA: Website ou Social Media
-    website = get_website_or_fallback(website, facebook, instagram, linkedin, cadastro_link)
-    
-    # LÓGICA: Extrair TODOS os emails (company + whois + adicionais)
-    all_emails = extract_all_emails(whois_data, email)
-    
-    # Adicionar emails adicionais se fornecidos
-    if additional_emails and additional_emails.strip():
-        extra = [e.strip() for e in additional_emails.split(",")]
-        all_emails.extend(extra)
-    
-    # Remover duplicatas
-    all_emails = list(dict.fromkeys(all_emails))
-    
-    # LÓGICA: Extrair TODOS os telefones (company + whois + adicionais)
-    all_phones = extract_all_phones(whois_data, telefone)
-    
-    # Adicionar telefones adicionais se fornecidos
-    if additional_phones and additional_phones.strip():
-        extra = [p.strip() for p in additional_phones.split(",")]
-        all_phones.extend(extra)
-    
-    # Remover duplicatas
-    all_phones = list(dict.fromkeys(all_phones))
-    
-    # LÓGICA: Partner Email com fallback
-    whois_email = extract_email_from_text(whois_data)
-    partner_email = get_partner_email_or_fallback(partner_email, whois_email, email)
-    
-    # Validações finais
-    domain = validate(domain, "Domain")
-    cnpj = validate(cnpj, "CNPJ")
-    fantasia = validate(fantasia, "Fantasy Name")
-    razao = validate(razao, "Legal Name")
-    endereco = validate(endereco, "Address")
-    
-    # Formatar múltiplos telefones
+    # Razão Social / Legal Name
+    razao = find([
+        r"Raz[aã]o\s+Social[:\s]+([^\n\r]+)",
+        r"Nome Empresarial[:\s]+([^\n\r]+)",
+        r"Empresa[:\s]+([^\n\r]+)",
+    ])
+    if razao:
+        result["razao"] = razao
+
+    # Nome Fantasia
+    fantasia = find([
+        r"Nome\s+Fantasia[:\s]+([^\n\r]+)",
+        r"Fantasia[:\s]+([^\n\r]+)",
+    ])
+    if fantasia and fantasia.lower() not in ["não informado", "nao informado", "-"]:
+        result["fantasia"] = fantasia
+
+    # Data de Abertura / Foundation Date
+    foundation = find([
+        r"Data\s+(?:de\s+)?Abertura[:\s]+(\d{2}/\d{2}/\d{4})",
+        r"Abertura[:\s]+(\d{2}/\d{2}/\d{4})",
+        r"Constitui[cç][aã]o[:\s]+(\d{2}/\d{2}/\d{4})",
+        r"Fundada?[:\s]+(\d{2}/\d{2}/\d{4})",
+        r"Data\s+de\s+In[ií]cio[:\s]+(\d{2}/\d{2}/\d{4})",
+    ])
+    if foundation:
+        result["foundation_date"] = foundation
+
+    # Município / City
+    city = find([
+        r"Munic[ií]pio[:\s]+([^\n\r\/,]+)",
+        r"Cidade[:\s]+([^\n\r\/,]+)",
+        r"Localidade[:\s]+([^\n\r\/,]+)",
+    ])
+    if city:
+        result["location"] = city.strip()
+
+    # CNAE / Atividade Principal
+    activity = find([
+        r"Atividade\s+Principal[:\s]+([^\n\r]+)",
+        r"CNAE\s+Principal[:\s]+[0-9\-\.]+\s*[-–]\s*([^\n\r]+)",
+        r"CNAE[:\s]+[0-9\-\.]+\s*[-–]\s*([^\n\r]+)",
+        r"Atividade\s+Econ[oô]mica\s+Principal[:\s]+([^\n\r]+)",
+    ])
+    if activity:
+        # Strip CNAE codes that may be prepended (e.g. "7319-0/99 – ")
+        activity = re.sub(r'^\d{4}[-–]\d/\d{2,}\s*[-–]\s*', '', activity).strip()
+        result["main_activity"] = activity
+
+    # Situação Cadastral / Status
+    status = find([
+        r"Situa[cç][aã]o\s+Cadastral[:\s]+([^\n\r]+)",
+        r"Situa[cç][aã]o[:\s]+([^\n\r]+)",
+        r"Status[:\s]+([^\n\r]+)",
+    ])
+    if status:
+        result["current_status"] = translate_status(status)
+
+    # Endereço
+    address = find([
+        r"Logradouro[:\s]+([^\n\r]+)",
+        r"Endere[cç]o[:\s]+([^\n\r]+)",
+    ])
+    # Try to build a full address
+    complemento = find([r"Complemento[:\s]+([^\n\r]+)"])
+    bairro = find([r"Bairro[:\s]+([^\n\r]+)"])
+    cep = find([r"CEP[:\s]+([\d\.\-]+)"])
+    uf = find([r"\bUF[:\s]+([A-Z]{2})\b", r"Estado[:\s]+([A-Z]{2})\b"])
+    if address:
+        parts = [address]
+        if complemento and complemento.lower() not in ["não informado", "nao informado", "-", ""]:
+            parts.append(complemento)
+        if bairro:
+            parts.append(bairro)
+        if city:
+            parts.append(city.strip())
+        if uf:
+            parts.append(uf)
+        if cep:
+            parts.append(f"CEP {cep}")
+        result["endereco"] = ", ".join(p.strip() for p in parts if p.strip())
+
+    # Telefone
+    phone = extract_phone(text)
+    if phone:
+        result["telefone"] = phone
+
+    # Email
+    email = extract_email(text)
+    if email:
+        result["email"] = email
+
+    # Website
+    website_match = find([
+        r"Site[:\s]+(https?://[^\s]+)",
+        r"Website[:\s]+(https?://[^\s]+)",
+        r"Homepage[:\s]+(https?://[^\s]+)",
+    ])
+    if website_match:
+        result["website"] = website_match
+
+    return result
+
+
+def parse_whois(text: str) -> dict:
+    """
+    Parses Registro.br / generic Whois output.
+    Handles both NIC.br format and generic WHOIS formats.
+    """
+    result = {}
+
+    def find_field(keys, txt=text):
+        for key in keys:
+            m = re.search(rf'^{key}:\s+(.+)$', txt, re.IGNORECASE | re.MULTILINE)
+            if m:
+                val = m.group(1).strip()
+                if val and val not in ["-", "N/A", ""]:
+                    return val
+        return None
+
+    # Owner / Razão Social
+    owner = find_field(["owner", "org-name", "registrant", "registrant name"])
+    if owner:
+        result["razao"] = owner
+
+    # CNPJ
+    cnpj = extract_cnpj(text)
+    if cnpj:
+        result["cnpj"] = cnpj
+
+    # Owner ID (for NIC.br, this is the handle)
+    # Country
+    country = find_field(["country"])
+
+    # Contact email
+    email = find_field(["e-mail", "email", "registrant email", "tech-email"])
+    if not email:
+        email = extract_email(text)
+    if email:
+        result["email"] = email
+
+    # Phone
+    phone = find_field(["phone", "registrant phone", "fax-no"])
+    if not phone:
+        phone = extract_phone(text)
+    if phone:
+        result["telefone"] = phone
+
+    # Responsible person
+    responsible = find_field(["responsible", "admin-c", "tech-c", "registrant name"])
+    if responsible:
+        result["partner_name"] = responsible
+
+    # Created date
+    created = find_field(["created", "creation date", "registered"])
+    if created:
+        # Normalize date if ISO format
+        iso_match = re.match(r'(\d{4})-(\d{2})-(\d{2})', created)
+        if iso_match:
+            created = f"{iso_match.group(3)}/{iso_match.group(2)}/{iso_match.group(1)}"
+        result["foundation_date"] = created
+
+    # Domain
+    domain = find_field(["domain", "domain name"])
+    if domain:
+        result["domain"] = domain.lower().strip()
+
+    # Address
+    address = find_field(["address", "registrant address", "street"])
+    city = find_field(["city", "registrant city"])
+    state = find_field(["state", "registrant state", "registrant state/province"])
+    postal = find_field(["postal-code", "zip", "registrant postal code", "zipcode"])
+    if address:
+        parts = [address]
+        if city:
+            parts.append(city)
+            result["location"] = city
+        if state:
+            parts.append(state)
+        if postal:
+            parts.append(postal)
+        if country:
+            parts.append(country)
+        result["endereco"] = ", ".join(p.strip() for p in parts if p.strip())
+
+    # Whois status
+    status = find_field(["status", "domain status"])
+    if status:
+        result["current_status"] = translate_status(status)
+
+    return result
+
+
+def parse_social_media(text: str) -> dict:
+    """
+    Extracts useful fields from pasted Facebook, Instagram, Linktree,
+    Bio.sites or any link aggregator page text.
+    """
+    result = {}
+
+    # Email
+    email = extract_email(text)
+    if email:
+        result["email"] = email
+
+    # Phone
+    phone = extract_phone(text)
+    if phone:
+        result["telefone"] = phone
+
+    # Detect social URLs present in text
+    urls = extract_urls(text)
+    for url in urls:
+        url_lower = url.lower()
+        if "facebook.com" in url_lower and "instagram" not in url_lower:
+            result.setdefault("facebook", url)
+        elif "instagram.com" in url_lower:
+            result.setdefault("instagram", url)
+        elif "linkedin.com" in url_lower:
+            result.setdefault("linkedin", url)
+        elif not any(x in url_lower for x in ["facebook", "instagram", "linkedin",
+                                                "linktree", "bio.site", "beacons",
+                                                "linktr.ee", "bit.ly"]):
+            result.setdefault("website", url)
+
+    # Try to extract a display name / company name (first non-empty line often)
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if lines:
+        candidate = lines[0]
+        # Only use if it looks like a name (not a URL or a long sentence)
+        if len(candidate) < 80 and "http" not in candidate and "@" not in candidate:
+            result["_display_name_hint"] = candidate
+
+    return result
+
+
+def parse_website(text: str) -> dict:
+    """
+    Extracts contacts from pasted website text (about page, footer, etc.)
+    """
+    result = {}
+
+    all_emails = extract_all_emails(text)
+    if all_emails:
+        result["email"] = all_emails[0]
+        if len(all_emails) > 1:
+            result["additional_emails"] = ", ".join(all_emails[1:])
+
+    all_phones = extract_all_phones(text)
+    if all_phones:
+        result["telefone"] = all_phones[0]
+        if len(all_phones) > 1:
+            result["additional_phones"] = ", ".join(all_phones[1:])
+
+    urls = extract_urls(text)
+    for url in urls:
+        url_lower = url.lower()
+        if "facebook.com" in url_lower:
+            result.setdefault("facebook", url)
+        elif "instagram.com" in url_lower:
+            result.setdefault("instagram", url)
+        elif "linkedin.com" in url_lower:
+            result.setdefault("linkedin", url)
+
+    return result
+
+# ============================================
+# APPLY EXTRACTED FIELDS → SESSION STATE
+# (never overwrites existing non-empty values)
+# ============================================
+
+FIELD_LABELS = {
+    "domain": "Domain",
+    "cnpj": "CNPJ",
+    "razao": "Legal Name",
+    "fantasia": "Fantasy Name",
+    "foundation_date": "Foundation Date",
+    "location": "Location",
+    "main_activity": "Main Activity",
+    "current_status": "Current Status",
+    "endereco": "Address",
+    "telefone": "Phone",
+    "email": "Email",
+    "partner_name": "Partner Name",
+    "partner_email": "Partner Email",
+    "website": "Website",
+    "facebook": "Facebook",
+    "instagram": "Instagram",
+    "linkedin": "LinkedIn",
+    "additional_emails": "Additional Emails",
+    "additional_phones": "Additional Phones",
+}
+
+def apply_extracted(extracted: dict, overwrite: bool = False) -> tuple[int, list]:
+    """
+    Merges extracted fields into session_state.form_data.
+    Returns (count_filled, list_of_filled_labels).
+    Never touches internal keys like _display_name_hint.
+    """
+    filled = []
+    for key, value in extracted.items():
+        if key.startswith("_"):
+            continue
+        if key not in st.session_state.form_data:
+            continue
+        current = st.session_state.form_data[key]
+        if overwrite or is_empty(current):
+            if value and str(value).strip():
+                st.session_state.form_data[key] = str(value).strip()
+                filled.append(FIELD_LABELS.get(key, key))
+    return len(filled), filled
+
+# ============================================
+# DOSSIER GENERATOR
+# ============================================
+
+def generate_dossier(data: dict) -> str:
+    d = data
+    whois_data = d.get("whois_data", "")
+
+    # Fallback: CNPJ from Whois
+    cnpj = d.get("cnpj", "")
+    if is_empty(cnpj):
+        cnpj = extract_cnpj(whois_data) or ""
+
+    # Fallback: Partner from Whois owner
+    partner_name = d.get("partner_name", "")
+    if is_empty(partner_name):
+        m = re.search(r'owner:\s+([^\n]+)', whois_data, re.I)
+        if m:
+            partner_name = m.group(1).strip()
+
+    # Website fallback
+    website = get_website_or_fallback(
+        d.get("website", ""), d.get("facebook", ""), d.get("instagram", ""),
+        d.get("linkedin", ""), d.get("cadastro_link", "")
+    )
+
+    # Contacts
+    all_emails, all_phones = extract_all_contacts(
+        whois_data, d.get("email", ""), d.get("telefone", ""),
+        d.get("additional_emails", ""), d.get("additional_phones", "")
+    )
+
+    whois_email = extract_email(whois_data)
+    partner_email = get_partner_email_or_fallback(
+        d.get("partner_email", ""), whois_email, d.get("email", "")
+    )
+
+    source = d.get("source", "General Source")
+    razao = d.get("razao", "")
+    fantasia = d.get("fantasia", "")
+    observations = d.get("observations", "")
+
+    # Validate core fields
+    domain_v = validate(d.get("domain", ""), "Domain")
+    cnpj_v = validate(cnpj, "CNPJ")
+    fantasia_v = validate(fantasia, "Fantasy Name")
+    razao_v = validate(razao, "Legal Name")
+    endereco_v = validate(d.get("endereco", ""), "Address")
+
     phones_str = format_multiple_contacts(all_phones, "phone")
-    
-    # Formatar múltiplos emails
     emails_str = format_multiple_contacts(all_emails, "email")
     if emails_str != "**(MISSING EMAIL PLEASE UPDATE)**":
         emails_str = f"{emails_str} (Source: {source})"
-    
-    # LÓGICA: Auto-gerar COMPANY DESCRIPTION se vazio
-    if not descricao or descricao.strip() in ["", "N/A", "-"]:
-        # Se tem dados de registry, gera automático
-        if razao and razao.strip() not in ["", "N/A", "-"]:
-            descricao = generate_description(razao, cnpj, foundation_date, location, main_activity, current_status)
+
+    # Description
+    descricao = d.get("descricao", "")
+    if is_empty(descricao):
+        if not is_empty(razao):
+            descricao = generate_description(
+                razao, cnpj, d.get("foundation_date", ""),
+                d.get("location", ""), d.get("main_activity", ""),
+                d.get("current_status", "")
+            )
         else:
             descricao = "**(MISSING DESCRIPTION PLEASE UPDATE)**"
-    
-    # Social Media
-    socials = []
-    if facebook and facebook.strip() not in ["", "N/A", "-"]:
-        socials.append(facebook.strip())
-    if instagram and instagram.strip() not in ["", "N/A", "-"]:
-        socials.append(instagram.strip())
-    if linkedin and linkedin.strip() not in ["", "N/A", "-"]:
-        socials.append(linkedin.strip())
-    
+
+    # Social media
+    socials = [v for k, v in [
+        ("facebook", d.get("facebook", "")),
+        ("instagram", d.get("instagram", "")),
+        ("linkedin", d.get("linkedin", "")),
+    ] if v and v.strip() not in ["", "N/A", "-"]]
     social_str = "\n".join(socials) if socials else "**(MISSING SOCIAL MEDIA PLEASE UPDATE)**"
-    
-    # Partner Block
-    if partner_name and partner_name.strip() not in ["", "N/A", "-"]:
-        partner_email_display = partner_email if partner_email and partner_email.strip() not in ["", "N/A", "-"] else "**(MISSING EMAIL)**"
-        partner_block = f"Partner: {partner_name.strip()} (Sócio-Administrador)\nEmail: {partner_email_display}\nSource: {source}"
+
+    # Partner block
+    if not is_empty(partner_name):
+        partner_email_display = partner_email if not is_empty(partner_email) else "**(MISSING EMAIL)**"
+        partner_block = (
+            f"Partner: {partner_name.strip()} (Sócio-Administrador)\n"
+            f"Email: {partner_email_display}\n"
+            f"Source: {source}"
+        )
     else:
-        partner_block = "Partner: **(MISSING PARTNER PLEASE UPDATE)**\nEmail: **(MISSING EMAIL)**\nSource: **(MISSING SOURCE)**"
-    
-    # Website
-    website_display = website if website else ""
-    
-    # Montar dossier
-    dossier = f"""ACTIONABLE DOMAIN:
-{domain}
+        partner_block = (
+            "Partner: **(MISSING PARTNER PLEASE UPDATE)**\n"
+            "Email: **(MISSING EMAIL)**\n"
+            "Source: **(MISSING SOURCE)**"
+        )
+
+    return f"""ACTIONABLE DOMAIN:
+{domain_v}
 
 LEGAL INFO/NAME OF THE COMPANY:
-CNPJ: {cnpj}
-Fantasy Name: {fantasia}
-Legal Name: {razao}
+CNPJ: {cnpj_v}
+Fantasy Name: {fantasia_v}
+Legal Name: {razao_v}
 
 COMPANY DESCRIPTION/ABOUT:
 {descricao}
 
 COMPANY WEBSITE:
-{website_display}
+{website if website else ''}
 
 CONTACT/ADDRESS INFORMATION:
-Address: {endereco} (Source: {source})
+Address: {endereco_v} (Source: {source})
 Phone: {phones_str}
 Email: {emails_str}
 
@@ -329,30 +635,32 @@ SOCIAL MEDIA:
 OBSERVATIONS:
 {observations.strip() if observations else ''}
 """
-    
-    return dossier
 
 # ============================================
-# STREAMLIT INTERFACE
+# SESSION STATE INIT
 # ============================================
 
-st.title("🕵️ Dossier Structure Tool v2 (Multi-Source)")
-st.markdown("**Fill in the fields as you find the data. Smart fallbacks handle missing info automatically.**")
+EMPTY_FORM = {
+    'domain': '', 'cnpj': '', 'fantasia': '', 'razao': '',
+    'descricao': '', 'website': '', 'endereco': '', 'telefone': '',
+    'email': '', 'partner_name': '', 'partner_email': '',
+    'facebook': '', 'instagram': '', 'linkedin': '',
+    'observations': '', 'source': 'General Source',
+    'whois_data': '', 'cadastro_link': '',
+    'foundation_date': '', 'location': '', 'main_activity': '', 'current_status': '',
+    'additional_phones': '', 'additional_emails': ''
+}
 
-# Initialize session state
 if 'form_data' not in st.session_state:
-    st.session_state.form_data = {
-        'domain': '', 'cnpj': '', 'fantasia': '', 'razao': '',
-        'descricao': '', 'website': '', 'endereco': '', 'telefone': '',
-        'email': '', 'partner_name': '', 'partner_email': '',
-        'facebook': '', 'instagram': '', 'linkedin': '',
-        'observations': '', 'source': 'General Source',
-        'whois_data': '', 'cadastro_link': '',
-        'foundation_date': '', 'location': '', 'main_activity': '', 'current_status': '',
-        'additional_phones': '', 'additional_emails': ''
-    }
+    st.session_state.form_data = EMPTY_FORM.copy()
 
-# Sidebar
+if 'autofill_feedback' not in st.session_state:
+    st.session_state.autofill_feedback = None  # (source_label, count, fields_list)
+
+# ============================================
+# SIDEBAR
+# ============================================
+
 with st.sidebar:
     st.markdown("### ⚙️ Settings")
     source = st.selectbox(
@@ -361,35 +669,123 @@ with st.sidebar:
         key="source_select"
     )
     st.session_state.form_data['source'] = source
-    
+
     if st.button("🗑️ Clear All Data", use_container_width=True):
-        st.session_state.form_data = {
-            'domain': '', 'cnpj': '', 'fantasia': '', 'razao': '',
-            'descricao': '', 'website': '', 'endereco': '', 'telefone': '',
-            'email': '', 'partner_name': '', 'partner_email': '',
-            'facebook': '', 'instagram': '', 'linkedin': '',
-            'observations': '', 'source': 'General Source',
-            'whois_data': '', 'cadastro_link': ''
-        }
+        st.session_state.form_data = EMPTY_FORM.copy()
+        st.session_state.autofill_feedback = None
         st.rerun()
-    
+
     st.markdown("---")
-    st.markdown("### 📝 Raw Data (for auto-extraction)")
-    st.markdown("Paste Whois or Cadastro data here for smart fallbacks")
-    st.session_state.form_data['whois_data'] = st.text_area(
-        "Whois / Cadastro Raw Data",
-        value=st.session_state.form_data['whois_data'],
-        height=150,
-        placeholder="Paste whois or cadastro empresa data..."
-    )
-    
+
+    # ── AUTO-FILL POR FONTE ──────────────────────────
+    st.markdown("### ⚡ Auto-Fill por Fonte")
+    st.caption("Cole o raw data de cada fonte e clique em Extrair. Campos já preenchidos não são sobrescritos.")
+
+    tab_cad, tab_whois, tab_social, tab_site = st.tabs(["🏢 Cadastro", "🌐 Whois", "📱 Social", "🔗 Website"])
+
+    with tab_cad:
+        cad_text = st.text_area(
+            "Cole o texto do Cadastro Empresa",
+            height=160,
+            placeholder="Razão Social: ...\nCNPJ: ...\nAtividade Principal: ...",
+            key="cad_raw"
+        )
+        overwrite_cad = st.checkbox("Sobrescrever campos existentes", key="ow_cad")
+        if st.button("⚡ Extrair e Preencher", key="btn_cad", use_container_width=True):
+            if cad_text.strip():
+                extracted = parse_cadastro_empresa(cad_text)
+                count, fields = apply_extracted(extracted, overwrite=overwrite_cad)
+                st.session_state.autofill_feedback = ("Cadastro Empresa", count, fields)
+                # Also store raw for fallback extraction in dossier
+                st.session_state.form_data['whois_data'] += "\n" + cad_text
+                st.rerun()
+            else:
+                st.warning("Cole o texto antes de extrair.")
+
+    with tab_whois:
+        whois_text = st.text_area(
+            "Cole o output do Whois / Registro.br",
+            height=160,
+            placeholder="domain: example.com.br\nowner: ...\ne-mail: ...",
+            key="whois_raw"
+        )
+        overwrite_whois = st.checkbox("Sobrescrever campos existentes", key="ow_whois")
+        if st.button("⚡ Extrair e Preencher", key="btn_whois", use_container_width=True):
+            if whois_text.strip():
+                extracted = parse_whois(whois_text)
+                count, fields = apply_extracted(extracted, overwrite=overwrite_whois)
+                st.session_state.autofill_feedback = ("Whois / Registro.br", count, fields)
+                st.session_state.form_data['whois_data'] += "\n" + whois_text
+                st.rerun()
+            else:
+                st.warning("Cole o texto antes de extrair.")
+
+    with tab_social:
+        social_text = st.text_area(
+            "Cole o texto da página social (Facebook, Instagram, Linktree...)",
+            height=160,
+            placeholder="Nome da empresa\nBio / descrição\nhttps://facebook.com/...",
+            key="social_raw"
+        )
+        overwrite_social = st.checkbox("Sobrescrever campos existentes", key="ow_social")
+        if st.button("⚡ Extrair e Preencher", key="btn_social", use_container_width=True):
+            if social_text.strip():
+                extracted = parse_social_media(social_text)
+                hint = extracted.pop("_display_name_hint", None)
+                count, fields = apply_extracted(extracted, overwrite=overwrite_social)
+                st.session_state.autofill_feedback = ("Social Media", count, fields)
+                if hint:
+                    st.info(f"💡 Nome detectado: **{hint}** — verifique se é o Fantasia/Razão Social.")
+                st.rerun()
+            else:
+                st.warning("Cole o texto antes de extrair.")
+
+    with tab_site:
+        site_text = st.text_area(
+            "Cole o texto do website da empresa",
+            height=160,
+            placeholder="Texto da página Sobre, rodapé, página de contato...",
+            key="site_raw"
+        )
+        overwrite_site = st.checkbox("Sobrescrever campos existentes", key="ow_site")
+        if st.button("⚡ Extrair e Preencher", key="btn_site", use_container_width=True):
+            if site_text.strip():
+                extracted = parse_website(site_text)
+                count, fields = apply_extracted(extracted, overwrite=overwrite_site)
+                st.session_state.autofill_feedback = ("Website", count, fields)
+                st.rerun()
+            else:
+                st.warning("Cole o texto antes de extrair.")
+
+    # Feedback de auto-fill
+    if st.session_state.autofill_feedback:
+        label, count, fields = st.session_state.autofill_feedback
+        if count > 0:
+            st.success(f"✅ {count} campo(s) preenchido(s) de {label}:\n" + ", ".join(fields))
+        else:
+            st.warning(f"⚠️ Nenhum campo novo extraído de {label}. Verifique se o texto está correto.")
+
+    st.markdown("---")
+    st.markdown("### 📎 Links de Referência")
     st.session_state.form_data['cadastro_link'] = st.text_input(
         "Cadastro Empresa Link",
         value=st.session_state.form_data['cadastro_link'],
         placeholder="https://cadastroempresa.com.br/..."
     )
 
-# Main form
+# ============================================
+# MAIN FORM
+# ============================================
+
+st.title("🕵️ Dossier Structure Tool v5")
+st.markdown("**Auto-fill por fonte · Autocomplete de atividade · Traduções PT→EN automáticas**")
+
+# Auto-fill feedback banner (also shown in main area for visibility)
+if st.session_state.autofill_feedback:
+    label, count, fields = st.session_state.autofill_feedback
+    if count > 0:
+        st.info(f"⚡ Auto-fill de **{label}**: {count} campo(s) preenchido(s) — {', '.join(fields)}")
+
 st.markdown("### 📋 Company Information")
 
 col1, col2, col3 = st.columns(3)
@@ -399,14 +795,12 @@ with col1:
         value=st.session_state.form_data['domain'],
         placeholder="e.g., example.com.br"
     )
-
 with col2:
     st.session_state.form_data['cnpj'] = st.text_input(
         "🆔 CNPJ",
         value=st.session_state.form_data['cnpj'],
         placeholder="e.g., 26.600.547/0001-11"
     )
-
 with col3:
     st.session_state.form_data['website'] = st.text_input(
         "🔗 Website",
@@ -421,7 +815,6 @@ with col1:
         value=st.session_state.form_data['razao'],
         placeholder="e.g., Comercial de Ferragens LTDA"
     )
-
 with col2:
     st.session_state.form_data['fantasia'] = st.text_input(
         "🏪 Fantasy Name (Nome Fantasia)",
@@ -429,55 +822,79 @@ with col2:
         placeholder="e.g., SP Portões"
     )
 
-st.markdown("**Company Registry Information** (used for auto-generated description)")
+st.markdown("**Company Registry Information** *(used for auto-generated description)*")
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
-    if 'foundation_date' not in st.session_state.form_data:
-        st.session_state.form_data['foundation_date'] = ""
     st.session_state.form_data['foundation_date'] = st.text_input(
         "📅 Foundation Date",
-        value=st.session_state.form_data['foundation_date'],
+        value=st.session_state.form_data.get('foundation_date', ''),
         placeholder="e.g., 24/11/2016"
     )
-
 with col2:
-    if 'location' not in st.session_state.form_data:
-        st.session_state.form_data['location'] = ""
     st.session_state.form_data['location'] = st.text_input(
         "📍 Location (City)",
-        value=st.session_state.form_data['location'],
+        value=st.session_state.form_data.get('location', ''),
         placeholder="e.g., São Paulo"
     )
-
 with col3:
-    if 'main_activity' not in st.session_state.form_data:
-        st.session_state.form_data['main_activity'] = ""
-    st.session_state.form_data['main_activity'] = st.text_input(
-        "🏭 Main Activity",
-        value=st.session_state.form_data['main_activity'],
-        placeholder="e.g., Installation of advertising panels"
-    )
+    # ── MAIN ACTIVITY — AUTOCOMPLETE ─────────────────
+    activity_history = load_activity_history()
+    current_activity = st.session_state.form_data.get('main_activity', '')
+
+    if activity_history:
+        # Build options: always include current value and a "New..." sentinel
+        NEW_SENTINEL = "✏️  Type a new activity..."
+        options = [NEW_SENTINEL] + activity_history
+
+        # Pre-select current value in list if it exists
+        try:
+            default_idx = activity_history.index(current_activity) + 1  # +1 for sentinel
+        except ValueError:
+            default_idx = 0  # Show sentinel (= new entry mode)
+
+        selected = st.selectbox(
+            "🏭 Main Activity",
+            options=options,
+            index=default_idx,
+            key="activity_select"
+        )
+
+        if selected == NEW_SENTINEL or selected is None:
+            new_activity = st.text_input(
+                "Type new activity",
+                value=current_activity if current_activity not in activity_history else "",
+                placeholder="e.g., Installation of advertising panels",
+                key="activity_new_input"
+            )
+            st.session_state.form_data['main_activity'] = new_activity
+        else:
+            st.session_state.form_data['main_activity'] = selected
+    else:
+        # No history yet — just a plain text input
+        st.session_state.form_data['main_activity'] = st.text_input(
+            "🏭 Main Activity",
+            value=current_activity,
+            placeholder="e.g., Installation of advertising panels",
+            key="activity_plain"
+        )
 
 with col4:
-    if 'current_status' not in st.session_state.form_data:
-        st.session_state.form_data['current_status'] = ""
     st.session_state.form_data['current_status'] = st.text_input(
         "✅ Current Status",
-        value=st.session_state.form_data['current_status'],
-        placeholder="e.g., Ativa"
+        value=st.session_state.form_data.get('current_status', ''),
+        placeholder="e.g., Active"
     )
 
 st.markdown("**Or paste description manually:**")
 st.session_state.form_data['descricao'] = st.text_area(
-    "📄 Company Description/About (auto-generated if empty)",
+    "📄 Company Description/About *(auto-generated if empty)*",
     value=st.session_state.form_data['descricao'],
     placeholder="Leave empty to auto-generate from registry info above...",
     height=80
 )
 
 st.markdown("### 📞 Contact Information")
-
 col1, col2, col3 = st.columns(3)
 with col1:
     st.session_state.form_data['telefone'] = st.text_input(
@@ -485,14 +902,12 @@ with col1:
         value=st.session_state.form_data['telefone'],
         placeholder="e.g., (11) 2211-8065"
     )
-
 with col2:
     st.session_state.form_data['email'] = st.text_input(
         "📧 Main Email",
         value=st.session_state.form_data['email'],
         placeholder="e.g., vendas@example.com.br"
     )
-
 with col3:
     st.session_state.form_data['endereco'] = st.text_input(
         "🏢 Address",
@@ -500,28 +915,22 @@ with col3:
         placeholder="Full address..."
     )
 
-st.markdown("**Additional Contacts** (separated by comma)")
+st.markdown("**Additional Contacts** *(separated by comma)*")
 col1, col2 = st.columns(2)
 with col1:
-    if 'additional_phones' not in st.session_state.form_data:
-        st.session_state.form_data['additional_phones'] = ""
     st.session_state.form_data['additional_phones'] = st.text_input(
         "Additional Phones",
-        value=st.session_state.form_data['additional_phones'],
+        value=st.session_state.form_data.get('additional_phones', ''),
         placeholder="e.g., (11) 98765-4321, (11) 3333-2222"
     )
-
 with col2:
-    if 'additional_emails' not in st.session_state.form_data:
-        st.session_state.form_data['additional_emails'] = ""
     st.session_state.form_data['additional_emails'] = st.text_input(
         "Additional Emails",
-        value=st.session_state.form_data['additional_emails'],
+        value=st.session_state.form_data.get('additional_emails', ''),
         placeholder="e.g., suporte@example.com.br, info@example.com.br"
     )
 
 st.markdown("### 👥 Key Personnel")
-
 col1, col2 = st.columns(2)
 with col1:
     st.session_state.form_data['partner_name'] = st.text_input(
@@ -529,7 +938,6 @@ with col1:
         value=st.session_state.form_data['partner_name'],
         placeholder="e.g., Renato Moura Yassuda"
     )
-
 with col2:
     st.session_state.form_data['partner_email'] = st.text_input(
         "Partner Email",
@@ -538,22 +946,19 @@ with col2:
     )
 
 st.markdown("### 📱 Social Media")
-
 col1, col2, col3 = st.columns(3)
 with col1:
     st.session_state.form_data['facebook'] = st.text_input(
         "📘 Facebook",
         value=st.session_state.form_data['facebook'],
-        placeholder="https://www.facebook.com/spportoessp/"
+        placeholder="https://www.facebook.com/example/"
     )
-
 with col2:
     st.session_state.form_data['instagram'] = st.text_input(
         "📷 Instagram",
         value=st.session_state.form_data['instagram'],
-        placeholder="https://www.instagram.com/spportoes/"
+        placeholder="https://www.instagram.com/example/"
     )
-
 with col3:
     st.session_state.form_data['linkedin'] = st.text_input(
         "💼 LinkedIn",
@@ -562,72 +967,48 @@ with col3:
     )
 
 st.markdown("### 💡 Observations & Red Flags")
-
 st.session_state.form_data['observations'] = st.text_area(
     "Add your insights, red flags, and observations here",
     value=st.session_state.form_data['observations'],
-    placeholder="E.g., Domain registrant mismatch, suspicious activity patterns, company match validated, etc.",
+    placeholder="E.g., Domain registrant mismatch, suspicious activity patterns...",
     height=120
 )
 
 st.markdown("---")
 
-# Generate dossier
+# ── GENERATE ─────────────────────────────────────────
 col_generate, col_copy = st.columns(2)
 
 with col_generate:
     if st.button("✅ Generate Formatted Dossier", use_container_width=True, type="primary"):
-        dossier = generate_dossier(
-            st.session_state.form_data['domain'],
-            st.session_state.form_data['cnpj'],
-            st.session_state.form_data['fantasia'],
-            st.session_state.form_data['razao'],
-            st.session_state.form_data['descricao'],
-            st.session_state.form_data['website'],
-            st.session_state.form_data['endereco'],
-            st.session_state.form_data['telefone'],
-            st.session_state.form_data['email'],
-            st.session_state.form_data['partner_name'],
-            st.session_state.form_data['partner_email'],
-            st.session_state.form_data['facebook'],
-            st.session_state.form_data['instagram'],
-            st.session_state.form_data['linkedin'],
-            st.session_state.form_data['observations'],
-            st.session_state.form_data['source'],
-            st.session_state.form_data['whois_data'],
-            st.session_state.form_data['cadastro_link'],
-            st.session_state.form_data.get('additional_emails', ''),
-            st.session_state.form_data.get('additional_phones', ''),
-            st.session_state.form_data.get('foundation_date', ''),
-            st.session_state.form_data.get('location', ''),
-            st.session_state.form_data.get('main_activity', ''),
-            st.session_state.form_data.get('current_status', '')
-        )
-        
+        dossier = generate_dossier(st.session_state.form_data)
         st.session_state.dossier = dossier
-        st.success("✅ Dossier Generated with Smart Fallbacks!")
+
+        # Save activity to history
+        activity_val = st.session_state.form_data.get('main_activity', '').strip()
+        if activity_val:
+            save_activity_to_history(activity_val)
+
+        st.success("✅ Dossier gerado com sucesso!")
 
 with col_copy:
     if st.button("📋 Copy Output", use_container_width=True):
         if 'dossier' in st.session_state:
-            st.info("⬆️ Select code below and Ctrl+C to copy")
+            st.info("⬆️ Selecione o código abaixo e pressione Ctrl+C para copiar.")
         else:
-            st.warning("Generate dossier first!")
+            st.warning("Gere o dossier primeiro!")
 
-# Output
+# ── OUTPUT ───────────────────────────────────────────
 if 'dossier' in st.session_state:
     st.markdown("### 📄 Formatted Dossier Output")
     st.code(st.session_state.dossier, language="text")
-    
-    # Stats
+
     col1, col2, col3 = st.columns(3)
     with col1:
-        filled_fields = sum(1 for v in st.session_state.form_data.values() if v and v.strip() not in ["", "N/A", "-"])
-        st.metric("Fields Filled", filled_fields)
-    
+        filled = sum(1 for v in st.session_state.form_data.values() if v and str(v).strip() not in ["", "N/A", "-"])
+        st.metric("Fields Filled", filled)
     with col2:
-        missing_critical = sum(1 for field in ['domain', 'cnpj', 'razao'] if not st.session_state.form_data.get(field, "").strip())
-        st.metric("Critical Missing", missing_critical)
-    
+        missing = sum(1 for f in ['domain', 'cnpj', 'razao'] if not st.session_state.form_data.get(f, "").strip())
+        st.metric("Critical Missing", missing)
     with col3:
         st.metric("Source", st.session_state.form_data['source'])
