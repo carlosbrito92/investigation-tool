@@ -105,7 +105,8 @@ def extract_all_emails(text):
     return list(dict.fromkeys(re.findall(pattern, text)))
 
 def extract_phone(text):
-    pattern = r'\(?\d{2}\)?\s*\d{4,5}[-\s]?\d{4}'
+    # Requires parentheses around DDD to avoid matching CNPJs or dates
+    pattern = r'\(\d{2}\)\s*\d{4,5}-\d{4}'
     match = re.search(pattern, text)
     return match.group(0) if match else None
 
@@ -244,22 +245,29 @@ def parse_cadastro_empresa(text: str) -> dict:
         result["location"] = city.strip()
 
     # CNAE / Atividade Principal
+    # Labeled field first (most precise), then CNAE code inline, then prose fallback
     activity = find([
+        r"CNAE/Atividade\s+Principal:\s*\n\s*[\d\.]+[-–]\d+/\d+\s*[-–]\s*([^\n\r]+)",
         r"Atividade\s+Principal[:\s]+([^\n\r]+)",
-        r"CNAE\s+Principal[:\s]+[0-9\-\.]+\s*[-–]\s*([^\n\r]+)",
-        r"CNAE[:\s]+[0-9\-\.]+\s*[-–]\s*([^\n\r]+)",
-        r"Atividade\s+Econ[oô]mica\s+Principal[:\s]+([^\n\r]+)",
+        r"CNAE\s+Principal[:\s]+[\d\.]+[-–][\d/]+\s*[-–]\s*([^\n\r]+)",
+        r"CNAE[:\s]+[\d\.]+[-–][\d/]+\s*[-–]\s*([^\n\r]+)",
+        r"atividade/CNAE\s+principal\s+[\d\.\-/]+\s*[-–]\s*([^,\.]+)",
     ])
     if activity:
-        # Strip CNAE codes that may be prepended (e.g. "7319-0/99 – ")
-        activity = re.sub(r'^\d{4}[-–]\d/\d{2,}\s*[-–]\s*', '', activity).strip()
+        # Strip any leading CNAE code remnants (e.g. "7319-0/99 – ")
+        activity = re.sub(r'^[\d\.\-/]+\s*[-–]\s*', '', activity).strip()
+        # Strip trailing prose (e.g. ", conforme informações da Receita Federal")
+        activity = re.split(r',\s+conforme\s+', activity)[0].strip().rstrip('.')
         result["main_activity"] = activity
 
     # Situação Cadastral / Status
+    # Priority: standalone "Situação: Ativa" line BEFORE "Situação Cadastral"
+    # (which is followed by a date, not a status word).
     status = find([
-        r"Situa[cç][aã]o\s+Cadastral[:\s]+([^\n\r]+)",
-        r"Situa[cç][aã]o[:\s]+([^\n\r]+)",
-        r"Status[:\s]+([^\n\r]+)",
+        r"^Situa[cç][aã]o:\s*(\w+)",
+        r"No momento sua situa[cç][aã]o [eé]\s+(\w+)",
+        r"sua situa[cç][aã]o [eé]\s+(\w+)",
+        r"Status[:\s]+(\w+)",
     ])
     if status:
         result["current_status"] = translate_status(status)
